@@ -35,6 +35,9 @@ standard library. pandas is optional and needed only for
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _metadata_version
+
 from . import filters, tools
 from .client import OPERATIONS, Client
 from .errors import Refused, Retry, SemanticError, TransportError, Unauthorized
@@ -50,7 +53,14 @@ from .models import (
     Result,
 )
 
-__version__ = "0.2.0"
+# Read from the installed metadata rather than written here, so there is one
+# version in the project and not two. The literal drifted from pyproject.toml
+# and the release that caught it was the one that failed: a wheel whose
+# version disagrees with its tag cannot be traced back to a commit.
+try:
+    __version__ = _metadata_version("truegrain")
+except PackageNotFoundError:  # running from a source tree, never installed
+    __version__ = "0+unknown"
 
 __all__ = [
     "AuditEvent",
