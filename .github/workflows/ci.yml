@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The client uses only the standard library, so the range it supports is
+        # the range it is tested on rather than whatever the maintainer happens
+        # to run.
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      # Includes test_covers_spec.py, which fails when the engine gains an
+      # operation this client cannot call.
+      - name: Test
+        run: pytest -q
+
+      - name: No tests were skipped
+        run: |
+          skipped=$(pytest -q -rs 2>&1 | grep -c '^SKIPPED' || true)
+          if [ "$skipped" != "0" ]; then
+            echo "$skipped test(s) skipped; the contract suite must not be silently absent"
+            pytest -q -rs 2>&1 | grep '^SKIPPED'
+            exit 1
+          fi
+
+  no-dependencies:
+    name: Imports without any third-party package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # The point of this client is that installing it into an agent's
+      # environment cannot conflict with anything already there. That claim is
+      # only true while it imports on a bare interpreter, so it is tested rather
+      # than asserted in the README.
+      - name: Install with no extras
+        run: pip install .
+
+      - name: Import and use it without pandas or pyyaml
+        run: |
+          python - <<'PY'
+          import truegrain
+          from truegrain import Client, Refused, filters, tools
+          c = Client("http://127.0.0.1:8080", token="not-used")
+          assert filters.eq("orders.status", "shipped")["op"] == "eq"
+          assert tools.tool_specs() and tools.TOOL_NAMES
+          r = Refused(code="fan_out_would_inflate", reason="x", retry="modify")
+          assert r.should_modify() and not r.is_final()
+          print("imports and works on a bare interpreter:", truegrain.__version__)
+          PY

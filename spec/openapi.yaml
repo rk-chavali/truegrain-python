@@ -1,0 +1,799 @@
+# OpenAPI description of the semantic engine's HTTP API.
+#
+# This file is the contract. SDKs are generated from it rather than hand
+# written, so a Python, TypeScript, Java or Rust client is a codegen run and not
+# a maintenance burden. Agent frameworks that consume OpenAPI (LangChain and
+# LlamaIndex toolkits among them) can discover every operation here with no
+# integration code at all.
+#
+# TestOpenAPIMatchesRoutes asserts that the paths below and the routes the
+# server actually registers are the same set. A published contract that drifts
+# from the running server is worse than no contract.
+
+openapi: 3.1.0
+
+info:
+  title: Semantic engine
+  version: "0.1.0"
+  description: |
+    An Apache Ossie semantic model compiled to governed, dialect-correct SQL.
+
+    There is no endpoint that accepts SQL, and there will not be one. The only
+    expressible request is a semantic one: metrics, dimensions and structured
+    filters. That is what makes an ungoverned query inexpressible rather than
+    merely discouraged.
+
+    Column access is resolved before SQL is emitted. A denied request returns a
+    refusal with a reason; it never returns an empty result set, because a
+    silent empty answer trains a caller to report a wrong number confidently.
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: http://127.0.0.1:8080
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: metadata
+    description: Discovering what the model can answer.
+  - name: query
+    description: Asking questions and inspecting how they compile.
+  - name: operations
+    description: What this deployment enforces.
+
+paths:
+  /v1/health:
+    get:
+      tags: [operations]
+      operationId: getHealth
+      summary: What this deployment enforces, including what it does not
+      description: |
+        Deliberately unauthenticated. It discloses no model content, and an
+        operator needs to read it before holding a credential.
+      security: []
+      responses:
+        "200":
+          description: Configuration and its honest limits
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /v1/model/version:
+    get:
+      tags: [operations]
+      operationId: getModelVersion
+      summary: The workspace digest currently served
+      responses:
+        "200":
+          description: Workspace name and digest
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  model: { type: string }
+                  model_version:
+                    type: string
+                    description: Content hash over every namespace digest.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/namespaces:
+    get:
+      tags: [metadata]
+      operationId: listNamespaces
+      summary: The namespaces in the workspace, their owners and availability
+      description: |
+        A namespace is one team's independently owned set of definitions. A
+        namespace that failed to load is reported with its error rather than
+        omitted, so a caller can tell a failure from a model that never had
+        those metrics.
+      responses:
+        "200":
+          description: Namespaces
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workspace, workspace_digest, namespaces]
+                properties:
+                  workspace: { type: string }
+                  workspace_digest: { type: string }
+                  namespaces:
+                    type: array
+                    items: { $ref: "#/components/schemas/Namespace" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/metrics:
+    get:
+      tags: [metadata]
+      operationId: listMetrics
+      summary: Every metric the caller may read
+      description: |
+        Metrics are returned with their namespace-qualified name. A metric whose
+        underlying columns this identity cannot read still appears, but its
+        dimension list is filtered to what the identity may group by.
+      parameters:
+        - name: search
+          in: query
+          required: false
+          schema: { type: string }
+          description: Case-insensitive substring over name and description.
+      responses:
+        "200":
+          description: Metrics
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [model, model_version, metrics]
+                properties:
+                  model: { type: string }
+                  model_version: { type: string }
+                  metrics:
+                    type: array
+                    items: { $ref: "#/components/schemas/Metric" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/metrics/{name}:
+    get:
+      tags: [metadata]
+      operationId: describeMetric
+      summary: One metric's definition and the dimensions legal for it
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+          description: |
+            Qualified as `namespace.metric`, or bare when unambiguous across the
+            workspace. An ambiguous bare name is refused with the candidates.
+      responses:
+        "200":
+          description: Metric definition
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MetricDetail" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/Refused" }
+
+  /v1/dimensions:
+    get:
+      tags: [metadata]
+      operationId: listDimensions
+      summary: Dimensions available for grouping and filtering
+      parameters:
+        - name: metric
+          in: query
+          required: false
+          schema: { type: string }
+          description: |
+            Restrict to dimensions valid for this metric, which is almost always
+            what you want. Without it, every dimension in the workspace.
+      responses:
+        "200":
+          description: Dimensions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [dimensions]
+                properties:
+                  dimensions:
+                    type: array
+                    items: { $ref: "#/components/schemas/Dimension" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/Refused" }
+
+  /v1/query:
+    post:
+      tags: [query]
+      operationId: query
+      summary: Answer a question and return rows
+      description: |
+        The response always carries the compiled SQL and the workspace digest
+        that produced it, so a disputed number can be traced to an exact set of
+        definitions.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QueryRequest" }
+      responses:
+        "200":
+          description: Rows
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueryResult" }
+        "400": { $ref: "#/components/responses/Refused" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Refused" }
+        "404": { $ref: "#/components/responses/Refused" }
+        "422": { $ref: "#/components/responses/Refused" }
+        "503": { $ref: "#/components/responses/Refused" }
+
+  /v1/compile:
+    post:
+      tags: [query]
+      operationId: compile
+      summary: Return the SQL a request compiles to, without running it
+      description: |
+        A dry run. The governance gate runs exactly as it does for a query, so
+        this is not a way to read the SQL for a metric you may not query: a
+        denied request returns a refusal and no SQL.
+
+        The decision is audited as `compiled` rather than `allowed`, which keeps
+        inspecting the model distinguishable from executing against it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QueryRequest" }
+      responses:
+        "200":
+          description: Compiled SQL
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CompileResult" }
+        "400": { $ref: "#/components/responses/Refused" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Refused" }
+        "404": { $ref: "#/components/responses/Refused" }
+        "422": { $ref: "#/components/responses/Refused" }
+        "503": { $ref: "#/components/responses/Refused" }
+
+  # Asynchronous execution. A warehouse query can run longer than the default
+  # HTTP timeout of every agent framework in use; synchronously the client
+  # gives up, retries, and the warehouse runs and bills the query twice.
+  /v1/jobs:
+    post:
+      tags: [query]
+      operationId: submitJob
+      summary: Start a query in the background and return a job identifier
+      description: |
+        Compilation, and therefore the governance gate, happens synchronously
+        before the job exists. A request the caller may not make never becomes
+        a job: it is refused on this call. A 202 is therefore a promise that
+        the query was authorized, not merely that it was accepted.
+
+        The compiled SQL is returned immediately, so a caller can show its work
+        without waiting for the warehouse.
+
+        A job is visible only to the identity that submitted it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QueryRequest" }
+      responses:
+        "202":
+          description: Accepted and running
+          headers:
+            Location:
+              description: The job resource to poll.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAccepted" }
+        "400": { $ref: "#/components/responses/Refused" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Refused" }
+        "404": { $ref: "#/components/responses/Refused" }
+        "422": { $ref: "#/components/responses/Refused" }
+        "503": { $ref: "#/components/responses/Refused" }
+
+  /v1/jobs/{id}:
+    get:
+      tags: [query]
+      operationId: getJob
+      summary: Poll a job and collect a page of its rows
+      description: |
+        Returns 200 whenever the job is readable by this caller, including when
+        the job itself failed: the poll succeeded, and the failure is described
+        in the body with the same `code`, `hint` and `retry` a synchronous
+        refusal carries. Branch on `state`, not on the status code.
+
+        `row_count` is the size of the whole result rather than of the page, so
+        a caller knows how much remains before walking it. When `next_cursor`
+        is present there are more rows; pass it back to read the next page.
+
+        A job belonging to another identity returns 404 rather than 403, so
+        job identifiers cannot be probed for existence.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque cursor from a previous page's `next_cursor`.
+          schema: { type: string }
+        - name: page_size
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 10000, default: 1000 }
+      responses:
+        "200":
+          description: Job state, and rows once it has succeeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/Refused" }
+        "422": { $ref: "#/components/responses/Refused" }
+    delete:
+      tags: [query]
+      operationId: cancelJob
+      summary: Cancel a running query
+      description: |
+        Idempotent. Cancelling a job that already finished returns its existing
+        state rather than an error.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The job state after cancellation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id: { type: string }
+                  state: { $ref: "#/components/schemas/JobState" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/Refused" }
+
+  /v1/audit:
+    get:
+      tags: [governance]
+      operationId: listAudit
+      summary: Read the decisions this engine recently made
+      description: |
+        Every decision the engine made, newest first: what was allowed, what
+        was refused for correctness, what was denied for access, and what
+        failed. This is the window an operator reads to answer "why did that
+        agent give up", which nothing else can answer.
+
+        Not served unless an operator names who may read it. The record
+        contains every caller's activity, which discloses what other teams
+        query and which fields are protected, so an engine with no reader
+        configured answers 404: the capability is absent rather than withheld.
+        A caller who is authenticated but not a named reader gets 403.
+
+        This is a bounded in-memory window, not the whole record. An engine
+        started with an audit file keeps everything there; this is what it can
+        still show you without shelling into the container.
+
+        Carries no filter values, no compiled SQL and no result rows, for the
+        same reason the audit file does not.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Most recent events to return.
+          schema: { type: integer, minimum: 1, maximum: 200, default: 200 }
+        - name: decision
+          in: query
+          required: false
+          description: Return only this decision. `refused` is the usual one.
+          schema:
+            type: string
+            enum: [allowed, refused, denied, compiled, error]
+      responses:
+        "200":
+          description: Recorded decisions, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events, count]
+                properties:
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/AuditEvent" }
+                  count: { type: integer }
+                  note:
+                    type: string
+                    description: Says that this is a window rather than the whole record.
+        "400": { $ref: "#/components/responses/Refused" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Refused" }
+        "404": { $ref: "#/components/responses/Refused" }
+
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        The token identifies a workload, and that workload identity is what the
+        governance gate and the executor use. Grants go to service accounts and
+        groups, never to individual humans.
+
+  responses:
+    Unauthorized:
+      description: Missing or unrecognised credentials
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Refusal" }
+    Refused:
+      description: |
+        The engine understood the request and declined it. Branch on `retry`.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Refusal" }
+
+  schemas:
+    AuditEvent:
+      type: object
+      description: |
+        One decision, as recorded. `refused` and `denied` are deliberately
+        separate: denied is access, meaning this caller may not read something,
+        and refused is correctness, meaning nobody can be told this accurately
+        and the hint names a question that can be answered. Reporting them
+        together would count every fan-out as an access incident.
+      required: [time, decision]
+      properties:
+        time: { type: string, format: date-time }
+        identity:
+          type: string
+          description: Who asked. `anonymous` on an engine without authentication.
+        model_name: { type: string }
+        model_version: { type: string }
+        namespace: { type: string }
+        metrics:
+          type: array
+          items: { type: string }
+        dimensions:
+          type: array
+          items: { type: string }
+        decision:
+          type: string
+          enum: [allowed, refused, denied, compiled, error]
+        refusal_code:
+          type: string
+          description: Which refusal, for a decision of `refused`.
+        retry:
+          type: string
+          enum: [modify, later, never]
+          description: What the caller should do about a refusal.
+        reason:
+          type: string
+          description: The refusal in the engine's own words, as the caller received it.
+        hint:
+          type: string
+          description: What would answer instead. The actionable half of a refusal.
+        denied_fields:
+          type: array
+          description: Semantic fields refused, on a denial. Never returned to the denied caller.
+          items: { type: string }
+        sql_hash:
+          type: string
+          description: Identifies the compiled statement without disclosing it.
+        dialect: { type: string }
+        job_id:
+          type: string
+          description: The warehouse's own identifier, so two logs can be joined.
+        row_count: { type: integer }
+        bytes_billed:
+          type: integer
+          format: int64
+          description: |
+            What the warehouse says the query cost. Absent means not reported
+            rather than free: DuckDB bills nobody and reports nothing.
+        duration_ms: { type: integer, format: int64 }
+        error:
+          type: string
+          description: The failure, for a decision of `error`.
+    Refusal:
+      type: object
+      required: [code, reason, retry]
+      properties:
+        code:
+          type: string
+          description: Machine-readable reason. Branch on this, not on the text.
+          examples: [fan_out_would_inflate, access_denied, unknown_metric]
+        reason:
+          type: string
+          description: One sentence stating what was wrong.
+        hint:
+          type: string
+          description: |
+            What to do instead. For a fan-out refusal this names the metrics
+            defined at the grain where the question is well defined.
+        retry: { $ref: "#/components/schemas/Retry" }
+
+    Retry:
+      type: string
+      enum: [modify, later, never]
+      description: |
+        What a caller should do about a refusal. This is the field an agent
+        branches on; without it a caller either gives up on a typo or loops
+        forever on a denial.
+
+        `modify`: the request is answerable but not as written. Change the
+        arguments and try again; repeating it unchanged will not work.
+
+        `later`: something outside the request failed, such as the policy
+        source being unreachable, or the caller is at their concurrency limit.
+        The same request may succeed later.
+
+        `never`: no version of this request from this caller will succeed.
+        Stop, and say so rather than guessing.
+
+    Filter:
+      type: object
+      required: [dimension, op]
+      description: |
+        A structured predicate. Never a SQL fragment: that is what keeps an
+        ungoverned predicate inexpressible.
+      properties:
+        dimension:
+          type: string
+          description: "`dataset.field`, or `namespace.dataset.field`."
+        op:
+          type: string
+          enum: [eq, ne, in, not_in, gt, gte, lt, lte, between, is_null, is_not_null]
+        values:
+          type: array
+          description: |
+            Value count depends on the operator: one for the comparisons, two
+            for `between`, one or more for `in` and `not_in`, none for the null
+            checks. Values are validated against the dimension's declared type
+            before planning, and are always bound as parameters.
+          items:
+            anyOf:
+              - { type: string }
+              - { type: number }
+              - { type: boolean }
+
+    Order:
+      type: object
+      required: [field]
+      properties:
+        field:
+          type: string
+          description: "An output column name: a metric name or a dimension field name."
+        desc: { type: boolean, default: false }
+
+    QueryRequest:
+      type: object
+      required: [metrics]
+      properties:
+        metrics:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: |
+            Qualified as `namespace.metric`, or bare when unambiguous. Metrics
+            at different grains, or in different namespaces, are aggregated
+            separately and joined on the shared dimensions.
+        dimensions:
+          type: array
+          items: { type: string }
+          description: "`dataset.field`, or `namespace.dataset.field`."
+        filters:
+          type: array
+          items: { $ref: "#/components/schemas/Filter" }
+        grain:
+          type: string
+          enum: [second, minute, hour, day, week, month, quarter, year]
+          description: |
+            Time bucket applied to the selected time dimension. Requesting a
+            grain with no time dimension selected is refused rather than ignored.
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100000
+          default: 1000
+        order_by:
+          type: array
+          items: { $ref: "#/components/schemas/Order" }
+
+    QueryResult:
+      type: object
+      required: [columns, rows, row_count, compiled_sql, model_version, dialect]
+      properties:
+        columns: { type: array, items: { type: string } }
+        rows:
+          type: array
+          description: Row-major, aligned to `columns`. A SQL null is JSON null.
+          items: { type: array, items: {} }
+        row_count: { type: integer }
+        compiled_sql:
+          type: string
+          description: |
+            The exact statement executed. Returned on every response on purpose:
+            it is how a parity dispute gets settled.
+        namespace: { type: string }
+        model_version: { type: string }
+        dialect: { type: string }
+
+    CompileResult:
+      type: object
+      required: [compiled_sql, columns, dialect, model_version]
+      properties:
+        compiled_sql: { type: string }
+        columns: { type: array, items: { type: string } }
+        dialect: { type: string }
+        namespace: { type: string }
+        parts:
+          type: integer
+          description: |
+            How many facts were aggregated separately and joined. More than one
+            means the query spanned grains or namespaces.
+        model_version: { type: string }
+
+    Metric:
+      type: object
+      required: [name, namespace, description, dimensions]
+      properties:
+        name: { type: string, description: "Qualified `namespace.metric`." }
+        namespace: { type: string }
+        description:
+          type: string
+          description: |
+            Written for a non-technical reader. An agent picks the metric from
+            this text, so treat its quality as a product feature.
+        datatype: { type: string }
+        synonyms: { type: array, items: { type: string } }
+        dimensions:
+          type: array
+          items: { type: string }
+          description: Only the dimensions this identity may read.
+
+    MetricDetail:
+      allOf:
+        - $ref: "#/components/schemas/Metric"
+        - type: object
+          properties:
+            definition:
+              type: string
+              description: The Ossie ANSI_SQL expression, verbatim from the model.
+
+    Dimension:
+      type: object
+      required: [name, is_time]
+      properties:
+        name: { type: string, description: "`namespace.dataset.field`." }
+        namespace: { type: string }
+        description: { type: string }
+        datatype: { type: string }
+        is_time: { type: boolean }
+        synonyms: { type: array, items: { type: string } }
+        grains:
+          type: array
+          items: { type: string }
+          description: Present only for a time dimension.
+
+    Namespace:
+      type: object
+      required: [name, available, metric_count]
+      properties:
+        name: { type: string }
+        available:
+          type: boolean
+          description: |
+            False when the namespace failed to load. A server keeps serving the
+            rest, so one team cannot take the layer down for everyone.
+        digest: { type: string }
+        owners: { type: array, items: { type: string } }
+        metric_count: { type: integer }
+        error: { type: string, description: Present only when unavailable. }
+
+    Health:
+      type: object
+      required: [workspace, workspace_digest, dialect, governance, enforcement_notes]
+      properties:
+        workspace: { type: string }
+        workspace_digest: { type: string }
+        ossie_spec_version: { type: string }
+        namespaces:
+          type: array
+          items: { $ref: "#/components/schemas/Namespace" }
+        dialect:
+          type: object
+          properties:
+            dialect: { type: string }
+            column_level_security: { type: boolean }
+            row_level_security: { type: boolean }
+            note: { type: string }
+        governance:
+          type: object
+          properties:
+            resolver: { type: string }
+            column_level: { type: boolean }
+            note: { type: string }
+        executor: { type: string }
+        metric_count: { type: integer }
+        dimension_count: { type: integer }
+        supported_filter_ops: { type: array, items: { type: string } }
+        supported_grains: { type: array, items: { type: string } }
+        enforcement_notes:
+          type: array
+          items: { type: string }
+          description: |
+            What this configuration does NOT enforce, in plain language.
+            Overstating a governance guarantee is worse than not offering one.
+
+    JobState:
+      type: string
+      enum: [running, succeeded, failed, cancelled]
+      description: |
+        `running` is the only non-terminal state. `cancelled` is distinct from
+        `failed`: the caller stopped it, the warehouse did not fail.
+
+    JobAccepted:
+      type: object
+      description: |
+        The acknowledgement of a submitted job. It carries the compiled SQL
+        because compilation already happened, synchronously, before the 202.
+      required: [job_id, state, compiled_sql]
+      properties:
+        job_id: { type: string, description: Opaque identifier, 128 bits of randomness. }
+        state: { $ref: "#/components/schemas/JobState" }
+        submitted_at: { type: string, format: date-time }
+        compiled_sql: { type: string }
+        columns:
+          type: array
+          items: { type: string }
+        namespace: { type: string }
+        model_version: { type: string }
+        dialect: { type: string }
+        parts:
+          type: integer
+          description: How many facts were aggregated separately and joined.
+
+    JobStatus:
+      type: object
+      description: |
+        The result of polling a job. Which fields are present depends on
+        `state`: rows only when `succeeded`, refusal fields only when `failed`.
+      required: [job_id, state]
+      properties:
+        job_id: { type: string }
+        state: { $ref: "#/components/schemas/JobState" }
+        submitted_at: { type: string, format: date-time }
+        finished_at:
+          type: string
+          format: date-time
+          description: Present once the job reached a terminal state.
+        elapsed_ms:
+          type: integer
+          description: Present while running.
+        duration_ms:
+          type: integer
+          description: Present once finished.
+        columns:
+          type: array
+          items: { type: string }
+        rows:
+          type: array
+          description: One page of rows. Present only when `state` is `succeeded`.
+          items:
+            type: array
+            items: {}
+        row_count:
+          type: integer
+          description: Rows in the whole result, not in this page.
+        next_cursor:
+          type: string
+          description: Present when more rows remain. Pass it back as `cursor`.
+        compiled_sql: { type: string }
+        namespace: { type: string }
+        model_version: { type: string }
+        dialect: { type: string }
+        code:
+          type: string
+          description: Present only when `state` is `failed`.
+        reason: { type: string }
+        hint: { type: string }
+        retry: { $ref: "#/components/schemas/Retry" }

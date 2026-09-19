@@ -1,0 +1,79 @@
+name: Spec drift
+
+# The contract lives in the engine repository. This client vendors a copy so it
+# builds offline and so a contract change arrives as a reviewable diff, but a
+# vendored copy is a copy that can quietly go stale.
+#
+# This job is what stops that. It fetches the engine's current spec, and if it
+# differs from the pinned one it opens a pull request carrying the new spec. The
+# client's own contract tests then run against it, so an endpoint this client
+# cannot call shows up as a failing check on that pull request rather than as a
+# support question.
+
+on:
+  schedule:
+    # Daily. A contract does not move often, and a drift noticed within a day is
+    # noticed long before anyone depends on the new operation.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the engine's current spec
+        run: |
+          curl -fsSL -o /tmp/upstream.yaml \
+            https://raw.githubusercontent.com/rk-chavali/truegrain/main/api/openapi.yaml
+          curl -fsSL -o /tmp/upstream.sha \
+            https://api.github.com/repos/rk-chavali/truegrain/commits/main
+          python -c "import json;print(json.load(open('/tmp/upstream.sha'))['sha'])" > /tmp/sha.txt
+
+      - name: Compare against the pin
+        id: compare
+        run: |
+          if diff -q spec/openapi.yaml /tmp/upstream.yaml >/dev/null; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "the vendored spec matches the engine"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "the contract moved:"
+            diff -u spec/openapi.yaml /tmp/upstream.yaml | head -60 || true
+          fi
+
+      - name: Update the pin
+        if: steps.compare.outputs.changed == 'true'
+        run: |
+          cp /tmp/upstream.yaml spec/openapi.yaml
+          cp /tmp/sha.txt spec/PINNED_AT
+
+      - name: Open a pull request
+        if: steps.compare.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: spec-drift
+          title: "The engine's API contract moved"
+          commit-message: |
+            Update the vendored OpenAPI spec
+
+            The engine's contract changed. The client's own contract tests run
+            against this spec, so a failing check here means an operation this
+            client cannot call.
+          body: |
+            The engine's `api/openapi.yaml` no longer matches the copy pinned here.
+
+            The contract tests in `tests/test_covers_spec.py` run against the
+            vendored spec, so:
+
+            - **checks pass**: the change is additive in a way this client already
+              handles, or cosmetic. Merge it.
+            - **checks fail**: the engine gained an operation this client cannot
+              call, or removed one it still claims. Add or remove the method and
+              update `OPERATIONS` in `truegrain/client.py`.
+          labels: contract

@@ -1,0 +1,78 @@
+name: Publish
+
+# Publishing uses PyPI Trusted Publishing, so there is no API token in this
+# repository and none in an organisation secret. PyPI verifies a short-lived
+# OIDC token minted by GitHub for this workflow in this repository, which means
+# a leaked secret cannot be used to publish because there is no secret.
+#
+# Setting it up, once, on PyPI:
+#   Your projects -> truegrain -> Publishing -> Add a trusted publisher
+#     Owner:        rk-chavali
+#     Repository:   truegrain-python
+#     Workflow:     publish.yml
+#     Environment:  pypi
+#
+# For the very first release, before the project exists, use the same form under
+# "Publishing" on your account and add it as a *pending* publisher.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install build tooling
+        run: pip install build
+
+      # The tests run again here rather than trusting the CI run on the commit.
+      # A release is built from a tag, and a tag can point anywhere.
+      - name: Test before building
+        run: |
+          pip install -e ".[dev]"
+          pytest -q
+
+      - name: Check the version matches the tag
+        if: github.event_name == 'release'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          declared=$(python -c "import truegrain; print(truegrain.__version__)")
+          if [ "$tag" != "$declared" ]; then
+            echo "tag $GITHUB_REF_NAME does not match __version__ $declared"
+            echo "a package whose version disagrees with its tag cannot be traced back to a commit"
+            exit 1
+          fi
+
+      - name: Build
+        run: python -m build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      # The OIDC token PyPI verifies. This is the whole credential.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "truegrain"
+version = "1.0.0"
+description = "Python client for truegrain: governed metrics for agents, notebooks and applications."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+keywords = ["semantic-layer", "metrics", "ossie", "governance", "agents", "mcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database :: Front-Ends",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+
+# Deliberately empty, and a CI job proves it: this package goes into agent
+# environments where a dependency conflict is a real cost, and the standard
+# library is enough for an HTTP client with thirteen endpoints.
+dependencies = []
+
+[project.optional-dependencies]
+pandas = ["pandas>=1.5"]
+dev = ["pytest>=7", "pandas>=1.5", "pyyaml>=6"]
+
+[project.urls]
+Homepage = "https://github.com/rk-chavali/truegrain-python"
+Documentation = "https://github.com/rk-chavali/truegrain-python#readme"
+Source = "https://github.com/rk-chavali/truegrain-python"
+Engine = "https://github.com/rk-chavali/truegrain"
+Issues = "https://github.com/rk-chavali/truegrain-python/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["truegrain"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
