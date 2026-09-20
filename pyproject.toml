@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "truegrain"
-version = "1.0.0"
+version = "1.1.0"
 description = "Python client for truegrain: governed metrics for agents, notebooks and applications."
 readme = "README.md"
 requires-python = ">=3.10"
