@@ -22,12 +22,18 @@ from .errors import Refused, SemanticError, TransportError, Unauthorized
 from .models import (
     AuditPage,
     Compiled,
+    Diagnosis,
+    Diff,
     Dimension,
+    DoctorHistory,
     Health,
     Job,
     Metric,
     Namespace,
+    Policy,
+    PolicyExplanation,
     Result,
+    TestReport,
 )
 
 __all__ = ["Client"]
@@ -50,6 +56,13 @@ OPERATIONS: dict[str, str] = {
     "getJob": "job",
     "cancelJob": "cancel_job",
     "listAudit": "audit",
+    "doctor": "doctor",
+    "doctorHistory": "doctor_history",
+    "runTests": "run_tests",
+    "policy": "policy",
+    "explainPolicy": "explain_policy",
+    "diff": "diff",
+    "reload": "reload",
 }
 
 DEFAULT_TIMEOUT = 60.0
@@ -379,6 +392,124 @@ class Client:
         if decision:
             params["decision"] = decision
         return AuditPage.parse(self._get("/v1/audit", params))
+
+    # ---------- what the engine says about itself ----------
+    #
+    # Everything here is metadata. None of it reads a row, which is why all but
+    # reload need only read:model, and why a pipeline that checks a model does
+    # not also need a credential that can read the warehouse.
+    #
+    # Four of them answer 404 rather than an empty success, and the difference
+    # matters enough to say once: an engine with no test suite is not an engine
+    # whose tests pass, an engine that has never reloaded is not an engine in
+    # which nothing changed, and an engine checking nothing on a timer has no
+    # history rather than a clean one. Each arrives as :class:`Refused`.
+
+    def doctor(self) -> Diagnosis:
+        """Ask the warehouse whether the model is still true.
+
+        Everything else validates the model against itself: the YAML parses,
+        the joins resolve, the expressions compile. None of that notices that
+        somebody dropped a column last Tuesday, and the first sign of that is
+        usually a caller getting an error, which is the most expensive place to
+        find it.
+
+        Reports rather than refuses, so an exception here means the check could
+        not run. Read :attr:`Diagnosis.ok` for the verdict and
+        :attr:`Diagnosis.skipped` for the case where nothing could be checked.
+        """
+        return Diagnosis.parse(self._get("/v1/doctor"))
+
+    def doctor_history(self) -> DoctorHistory:
+        """What the scheduled warehouse check has seen, oldest first.
+
+        Drift is found by looking regularly, not by looking once, which is how
+        "when did this start" stays answerable. An engine started without
+        ``-doctor-every`` has nothing scheduled and answers 404 as
+        :class:`Refused`.
+        """
+        return DoctorHistory.parse(self._get("/v1/doctor/history"))
+
+    def run_tests(self) -> TestReport:
+        """Assert what this model answers.
+
+        ``validate`` says the model holds together and :meth:`diff` says a
+        number changed. Neither says a number was ever right.
+
+        Check :attr:`TestReport.withheld` as well as ``ok``. A credential
+        without ``run:query`` cannot cause warehouse execution, so cases that
+        would are withheld and counted rather than run or silently dropped, and
+        a caller reading only ``ok`` would conclude a suite passed when half of
+        it never ran.
+        """
+        return TestReport.parse(self._post("/v1/tests", {}))
+
+    def policy(self) -> Policy:
+        """What this engine enforces, and what it does not.
+
+        Says nothing about who is allowed what. For that, and only about
+        yourself, use :meth:`explain_policy`.
+        """
+        return Policy.parse(self._get("/v1/policy"))
+
+    def explain_policy(self, metric: str) -> PolicyExplanation:
+        """What you may read of a metric, and why.
+
+        Answers "why can I not group by that column" without running a query
+        and being denied. For the calling identity only, which is a security
+        property rather than a limitation: an endpoint that reported another
+        identity's access would publish the policy it was configured to
+        enforce.
+
+        Args:
+            metric: The qualified name, as :meth:`metrics` reports it.
+        """
+        if not metric:
+            # Refused here rather than sent, so a caller who forgot the
+            # argument reads that instead of a 400 naming a field they did not
+            # write.
+            raise ValueError("name the metric to explain")
+        return PolicyExplanation.parse(self._post("/v1/policy/explain", {"metric": metric}))
+
+    def diff(self) -> Diff:
+        """Whether the last model reload moved a number.
+
+        This compares the model being served against the one served before it,
+        which is the comparison nobody can make from outside the process. An
+        engine that has served only one model answers 404 as :class:`Refused`,
+        because that is a different answer from nothing having changed and only
+        one of them is reassuring.
+        """
+        return Diff.parse(self._get("/v1/diff"))
+
+    def reload(self) -> str:
+        """Tell the engine to re-read its model source.
+
+        Returns ``reading`` or ``already running``. Both mean the caller got
+        what they asked for; treating the second as a failure would retry a
+        sync that is already under way.
+
+        It carries no model, deliberately: this means "look now", not "install
+        this". The engine already follows git, so the only thing this changes
+        is the wait. A method that accepted a model would be a second way into
+        production, one that skips the pull request, the checks and the diff
+        that reports which numbers move.
+
+        Needs the ``deploy:model`` scope, which ``read:model`` and
+        ``run:query`` never imply.
+
+        Returning does not mean the new model is serving. A sync is not
+        instant, and reporting a commit before the swap happened would be a
+        claim a pipeline then asserts as fact. Poll :meth:`health` and read
+        ``origin.commit`` to know when the new model is the one answering.
+
+        An engine reading from a path has nothing to re-read and answers 404. A
+        model that fails to load is not a failure of this call either: the
+        engine keeps serving the previous one and says so in a 502. Both are
+        :class:`Refused`.
+        """
+        payload = self._post("/v1/reload", {})
+        return str(payload.get("status", ""))
 
     # ---------- internals ----------
 

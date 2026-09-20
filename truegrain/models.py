@@ -120,10 +120,15 @@ class Health:
     #: Plain-language statements of what this configuration does NOT enforce.
     #: Read them before trusting the layer with anything sensitive.
     enforcement_notes: tuple[str, ...] = ()
+    #: Where the served model came from, or ``None`` when the engine read it
+    #: from a path. ``None`` is the answer to "is this deployment under version
+    #: control", so check it before reading through it.
+    origin: "Origin | None" = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
     def parse(cls, payload: dict[str, Any]) -> "Health":
+        origin = payload.get("origin")
         return cls(
             workspace=_get(payload, "workspace", ""),
             workspace_digest=_get(payload, "workspace_digest", ""),
@@ -132,6 +137,7 @@ class Health:
             dimension_count=int(_get(payload, "dimension_count", 0)),
             namespaces=tuple(Namespace.parse(n) for n in _get(payload, "namespaces", [])),
             enforcement_notes=tuple(_get(payload, "enforcement_notes", [])),
+            origin=Origin.parse(origin) if origin else None,
             raw=payload,
         )
 
@@ -469,3 +475,325 @@ class AuditPage:
     def refusals(self) -> tuple[AuditEvent, ...]:
         """Only the refusals, which is what an operator opens this to read."""
         return tuple(e for e in self.events if e.is_refusal())
+
+
+@dataclass(frozen=True)
+class Origin:
+    """The commit a served model came from.
+
+    How :meth:`Client.reload` is confirmed. Reload names no commit, because a
+    sync is not instant and reporting one before the swap happened would be a
+    claim a pipeline then asserts as fact. A deploy is finished when
+    :attr:`Health.origin` reports the commit you merged, and not before.
+
+    Carries no credential. A repository URL with one in it is refused at
+    startup rather than stored here and redacted on the way out.
+    """
+
+    #: The clone URL, without credentials.
+    repository: str = ""
+    #: The branch, tag or commit asked for. A ref moves; read ``commit`` to
+    #: know what actually answered.
+    ref: str = ""
+    #: The revision serving right now.
+    commit: str = ""
+    #: The directory inside the repository holding the workspace.
+    subdirectory: str = ""
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def parse(cls, payload: dict[str, Any]) -> "Origin":
+        return cls(
+            repository=_get(payload, "repository", ""),
+            ref=_get(payload, "ref", ""),
+            commit=_get(payload, "commit", ""),
+            subdirectory=_get(payload, "subdirectory", ""),
+            raw=payload,
+        )
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One thing the warehouse disagrees with the model about."""
+
+    #: ``error`` for something that will break a query, ``warning`` for
+    #: something that will not break today.
+    severity: str = ""
+    #: What it is about, in model terms.
+    dataset: str = ""
+    #: ``field`` on the wire. Renamed here because this module already uses
+    #: that name for dataclasses.field.
+    field_name: str = ""
+    #: The physical table, for somebody about to go and look.
+    source: str = ""
+    message: str = ""
+    #: What to do, when there is something to do.
+    hint: str = ""
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def parse(cls, payload: dict[str, Any]) -> "Finding":
+        return cls(
+            severity=_get(payload, "severity", ""),
+            dataset=_get(payload, "dataset", ""),
+            field_name=_get(payload, "field", ""),
+            source=_get(payload, "source", ""),
+            message=_get(payload, "message", ""),
+            hint=_get(payload, "hint", ""),
+            raw=payload,
+        )
+
+
+@dataclass(frozen=True)
+class Diagnosis:
+    """What the warehouse says about the model right now.
+
+    It reports rather than refuses: a model can be wrong in ways that do not
+    matter yet, and which of those to act on is a person's decision.
+    """
+
+    #: False when a finding would break a query. Not the same as having no
+    #: findings.
+    ok: bool = True
+    tables_checked: int = 0
+    findings: tuple[Finding, ...] = ()
+    #: Why nothing was checked, when nothing was. A Diagnosis with no findings
+    #: and ``skipped`` set is the engine saying it could not look, not saying
+    #: everything is fine.
+    skipped: str = ""
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def parse(cls, payload: dict[str, Any]) -> "Diagnosis":
+        return cls(
+            ok=bool(_get(payload, "ok", True)),
+            tables_checked=int(_get(payload, "tables_checked", 0)),
+            findings=tuple(Finding.parse(f) for f in _get(payload, "findings", [])),
+            skipped=_get(payload, "skipped", ""),
+            raw=payload,
+        )
+
+    def errors(self) -> tuple[Finding, ...]:
+        """Only the findings that will break a query."""
+        return tuple(f for f in self.findings if f.severity == "error")
+
+
+@dataclass(frozen=True)
+class DoctorRun:
+    """One scheduled check."""
+
+    #: RFC 3339.
+    at: str = ""
+    ok: bool = True
+    tables_checked: int = 0
+    findings: int = 0
+    #: Set when the check could not run at all, which is a different thing from
+    #: running and finding something wrong.
+    error: str = ""
+    #: Ties the result to what was being served, so a run from before a reload
+    #: is not read as evidence about the model after it.
+    model_version: str = ""
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def parse(cls, payload: dict[str, Any]) -> "DoctorRun":
+        return cls(
+            at=_get(payload, "at", ""),
+            ok=bool(_get(payload, "ok", True)),
+            tables_checked=int(_get(payload, "tables_checked", 0)),
+            findings=int(_get(payload, "findings", 0)),
+            error=_get(payload, "error", ""),
+            model_version=_get(payload, "model_version", ""),
+            raw=payload,
+        )
+
+
+@dataclass(frozen=True)
+class DoctorHistory:
+    """What the scheduled check has seen, oldest first."""
+
+    runs: tuple[DoctorRun, ...] = ()
+    #: The configured interval, which is how a reader tells a gap from a check
+    #: that has simply not come round yet.
+    every_seconds: int = 0
+    #: Runs that completed and found the warehouse changed.
+    drifted: int = 0
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def parse(cls, payload: dict[str, Any]) -> "DoctorHistory":
+        return cls(
+            runs=tuple(DoctorRun.parse(r) for r in _get(payload, "runs", [])),
+            every_seconds=int(_get(payload, "every_seconds", 0)),
+            drifted=int(_get(payload, "drifted", 0)),
+            raw=payload,
+        )
+
+    def __iter__(self) -> Iterator[DoctorRun]:
+        return iter(self.runs)
+
+    def __len__(self) -> int:
+        return len(self.runs)
+
+
+@dataclass(frozen=True)
+class TestCase:
+    """One assertion and what became of it."""
+
+    name: str = ""
+    passed: bool = False
+    skipped: bool = False
+    #: Why, for a case that failed or was skipped.
+    reason: str = ""
+    duration_ms: int = 0
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def parse(cls, payload: dict[str, Any]) -> "TestCase":
+        return cls(
+            name=_get(payload, "name", ""),
+            passed=bool(_get(payload, "passed", False)),
+            skipped=bool(_get(payload, "skipped", False)),
+            reason=_get(payload, "reason", ""),
+            duration_ms=int(_get(payload, "duration_ms", 0)),
+            raw=payload,
+        )
+
+
+@dataclass(frozen=True)
+class TestReport:
+    """The result of every case in the suite.
+
+    Read :attr:`withheld` as well as :attr:`ok`. A credential without
+    ``run:query`` cannot cause warehouse execution, so cases that would are
+    withheld and counted rather than run or silently dropped, and a caller
+    reading only ``ok`` would conclude a suite passed when half of it never
+    ran.
+    """
+
+    ok: bool = False
+    passed: int = 0
+    failed: int = 0
+    skipped: int = 0
+    #: Cases this credential may not run.
+    withheld: int = 0
+    results: tuple[TestCase, ...] = ()
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def parse(cls, payload: dict[str, Any]) -> "TestReport":
+        return cls(
+            ok=bool(_get(payload, "ok", False)),
+            passed=int(_get(payload, "passed", 0)),
+            failed=int(_get(payload, "failed", 0)),
+            skipped=int(_get(payload, "skipped", 0)),
+            withheld=int(_get(payload, "withheld", 0)),
+            results=tuple(TestCase.parse(r) for r in _get(payload, "results", [])),
+            raw=payload,
+        )
+
+    def __iter__(self) -> Iterator[TestCase]:
+        return iter(self.results)
+
+    def failures(self) -> tuple[TestCase, ...]:
+        """Only the cases that failed, which is what a pipeline prints."""
+        return tuple(c for c in self.results if not c.passed and not c.skipped)
+
+
+@dataclass(frozen=True)
+class Policy:
+    """What the engine enforces. Says nothing about who is allowed what."""
+
+    #: The resolver in force and whether it makes column-level decisions.
+    governance: dict[str, Any] = field(default_factory=dict)
+    #: The gaps in plain language. Read these: an engine running allow-all
+    #: says so here rather than letting a reader assume a gate exists because
+    #: the product has one.
+    enforcement_notes: tuple[str, ...] = ()
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def parse(cls, payload: dict[str, Any]) -> "Policy":
+        return cls(
+            governance=dict(_get(payload, "governance", {})),
+            enforcement_notes=tuple(_get(payload, "enforcement_notes", [])),
+            raw=payload,
+        )
+
+    @property
+    def governs_columns(self) -> bool:
+        """Whether column-level access control is actually configured."""
+        return bool(self.governance.get("column_level", False))
+
+
+@dataclass(frozen=True)
+class PolicyExplanation:
+    """What the calling identity may read of a metric, and why.
+
+    For the caller only. An engine that reported what somebody else can see
+    would publish the policy it was configured to enforce, so there is no
+    field here for another identity and no endpoint that takes one.
+    """
+
+    metric: str = ""
+    identity: str = ""
+    #: The dimensions this caller may group the metric by, qualified and
+    #: sorted.
+    readable: tuple[str, ...] = ()
+    governance: dict[str, Any] = field(default_factory=dict)
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def parse(cls, payload: dict[str, Any]) -> "PolicyExplanation":
+        return cls(
+            metric=_get(payload, "metric", ""),
+            identity=_get(payload, "identity", ""),
+            readable=tuple(_get(payload, "readable", [])),
+            governance=dict(_get(payload, "governance", {})),
+            raw=payload,
+        )
+
+
+@dataclass(frozen=True)
+class Change:
+    """What one request compiled to before and after a reload."""
+
+    before: str = ""
+    after: str = ""
+
+    @classmethod
+    def parse(cls, payload: dict[str, Any]) -> "Change":
+        return cls(before=_get(payload, "before", ""), after=_get(payload, "after", ""))
+
+
+@dataclass(frozen=True)
+class Diff:
+    """What the last reload moved.
+
+    Compared on compiled SQL rather than on model text, because that is where a
+    silent correctness incident lives: the model still validates, the tests
+    still pass, and every dashboard quietly moves. Renaming a description does
+    not appear here; changing a join, a grain or an expression does.
+    """
+
+    changed: bool = False
+    #: ``from`` on the wire. Renamed here because ``from`` is a keyword.
+    from_version: str = ""
+    to_version: str = ""
+    added: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+    #: Request label to its SQL before and after.
+    altered: dict[str, Change] = field(default_factory=dict)
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def parse(cls, payload: dict[str, Any]) -> "Diff":
+        return cls(
+            changed=bool(_get(payload, "changed", False)),
+            from_version=_get(payload, "from", ""),
+            to_version=_get(payload, "to", ""),
+            added=tuple(_get(payload, "added", [])),
+            removed=tuple(_get(payload, "removed", [])),
+            altered={k: Change.parse(v) for k, v in _get(payload, "altered", {}).items()},
+            raw=payload,
+        )
